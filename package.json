@@ -1,0 +1,15 @@
+{
+  "name": "terminal-support",
+  "version": "1.0.0",
+  "description": "Terminal's official product support bot.",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "discord.js": "^13.2.0",
+    "dotenv": "^16.4.5",
+    "sqlite3": "^6.0.1"
+  }
+}
