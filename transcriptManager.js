@@ -3,7 +3,6 @@ const path = require('path');
 const { MessageAttachment, MessageEmbed } = require('discord.js');
 
 const tempDir = path.join(__dirname, 'temp_transcripts');
-const counterFilePath = path.join(__dirname, 'ticket_counter.json');
 const productNames = {
     'terminal-lite-messenger': 'Terminal Lite Messenger',
     'terminal-music-player': 'Terminal Music Player',
@@ -11,14 +10,6 @@ const productNames = {
 };
 
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
-
-function getNextTicketNumber() {
-    let count = 0;
-    try { count = JSON.parse(fs.readFileSync(counterFilePath, 'utf8')).count || 0; } catch (_) { /* first ticket */ }
-    count += 1;
-    fs.writeFileSync(counterFilePath, JSON.stringify({ count }));
-    return String(count).padStart(4, '0');
-}
 
 async function fetchAllMessages(thread) {
     const messages = [];
@@ -33,11 +24,11 @@ async function fetchAllMessages(thread) {
 }
 
 function buildTranscript(thread, messages, ticket) {
-    const lines = ['TERMINAL SUPPORT TICKET', `Thread: ${thread.name}`, `Product: ${productNames[ticket?.category] || 'Others'}`, ''];
+    const lines = ['TERMINAL SUPPORT TICKET', `Ticket ID: ${ticket.ticket_id}`, `Thread: ${thread.name}`, `Product: ${productNames[ticket.category] || 'Others'}`, ''];
     for (const message of messages) {
         const time = message.createdAt.toISOString().slice(11, 19);
         const embeddedAuthor = message.embeds[0]?.author?.name;
-        const sender = message.author.id === ticket?.user_id || (message.author.bot && embeddedAuthor) ? 'User' : (message.author.bot ? 'Bot' : 'MOD');
+        const sender = message.author.id === ticket.user_id || (message.author.bot && embeddedAuthor) ? 'User' : (message.author.bot ? 'Bot' : 'MOD');
         const authorName = sender === 'User' && embeddedAuthor ? embeddedAuthor : message.author.username;
         const content = message.content || message.embeds.map(embed => embed.description || embed.title || '').filter(Boolean).join('\n') || '*No text content*';
         lines.push(`[${time}] [${sender}]`);
@@ -48,25 +39,33 @@ function buildTranscript(thread, messages, ticket) {
     return lines.join('\n');
 }
 
-async function handleThreadClose(db, thread, closureInfo, done) {
-    db.get('SELECT * FROM threads WHERE thread_channel_id = ?', [thread.id], async (error, ticket) => {
-        if (error) return console.error('Transcript ticket lookup failed:', error);
-        try {
-            const number = getNextTicketNumber();
-            const filename = `terminal-ticket-${number}.txt`;
-            const filepath = path.join(tempDir, filename);
-            fs.writeFileSync(filepath, buildTranscript(thread, await fetchAllMessages(thread), ticket), 'utf8');
-            const parent = thread.parent || await thread.client.channels.fetch(thread.parentId);
-            const embed = new MessageEmbed().setColor('#16C9E8').setTitle('Support Ticket Closed')
-                .setDescription(`**Ticket:** \`${thread.name}\`\n**Product:** ${productNames[ticket?.category] || 'Others'}\n**Reason:** ${closureInfo.reason || 'Closed by support'}\n\n📄 Full conversation logs are attached above.`)
-                .setTimestamp();
-            await parent.send({ embeds: [embed], files: [new MessageAttachment(filepath, filename)] });
-            fs.unlinkSync(filepath);
-            done();
-        } catch (failure) {
-            console.error('Transcript upload failed:', failure);
-        }
-    });
+async function handleThreadClose(thread, ticket, closureInfo) {
+    const filename = `terminal-ticket-${ticket.ticket_id}.txt`;
+    const filepath = path.join(tempDir, filename);
+    try {
+        fs.writeFileSync(filepath, buildTranscript(thread, await fetchAllMessages(thread), ticket), 'utf8');
+        const parent = thread.parent || await thread.client.channels.fetch(thread.parentId);
+        if (!parent?.send) throw new Error('Product logging channel is unavailable');
+        const guildId = thread.guildId || thread.guild?.id;
+        const threadUrl = guildId ? `https://discord.com/channels/${guildId}/${thread.id}` : `<#${thread.id}>`;
+        const owner = closureInfo.ticketOwner;
+        const createdAt = ticket.created_at ? `<t:${Math.floor(Number(ticket.created_at) / 1000)}:F>` : 'Unknown';
+        const closedAt = `<t:${Math.floor(Number(closureInfo.closedAt) / 1000)}:F>`;
+        const logEmbed = new MessageEmbed().setColor('#16C9E8').setTitle('Support Ticket Closed').addFields(
+            { name: 'Ticket ID', value: `\`${ticket.ticket_id}\``, inline: true },
+            { name: 'Product', value: productNames[ticket.category] || 'Others', inline: true },
+            { name: 'Ticket Owner', value: owner ? `${owner.tag} (${owner.id})` : ticket.user_id, inline: false },
+            { name: 'Discord Channel', value: `<#${thread.parentId}>`, inline: true },
+            { name: 'Thread', value: `[Open ticket thread](${threadUrl})`, inline: true },
+            { name: 'Created At', value: createdAt, inline: true },
+            { name: 'Closed At', value: closedAt, inline: true },
+            { name: 'Closure Reason', value: closureInfo.reason, inline: true },
+            { name: 'Closed By', value: closureInfo.closedBy, inline: true }
+        ).setFooter('Full conversation logs are attached above.').setTimestamp();
+        await parent.send({ embeds: [logEmbed], files: [new MessageAttachment(filepath, filename)] });
+    } finally {
+        if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+    }
 }
 
 module.exports = { handleThreadClose };
